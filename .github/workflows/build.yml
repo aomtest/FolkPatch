@@ -39,6 +39,9 @@ env:
   KEYSTORE_PASSWORD: android
   KEY_ALIAS: androiddebugkey
   KEY_PASSWORD: android
+  # 上游仓库配了 KEYSTORE_BASE64 secret 用于正式签名；fork 不继承 secrets，
+  # 所以这里先探测一次，供下面的步骤决定走"正式签名"还是"debug 签名"。
+  HAS_KEYSTORE: ${{ secrets.KEYSTORE_BASE64 != '' }}
 
 jobs:
   prepare:
@@ -134,10 +137,12 @@ jobs:
         run: ./gradlew printVersion --no-daemon
 
       - name: Decode keystore
+        if: env.HAS_KEYSTORE == 'true'
         run: |
           echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > FolkPatch.jks
 
       - name: Create keystore.properties
+        if: env.HAS_KEYSTORE == 'true'
         run: |
           cat > keystore.properties << 'EOF'
           KEYSTORE_FILE=../FolkPatch.jks
@@ -145,6 +150,27 @@ jobs:
           KEY_ALIAS=${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD=${{ secrets.KEY_PASSWORD }}
           EOF
+
+      # fork 场景：没有 KEYSTORE_BASE64，上面两步会跳过。
+      # 此时必须自己造一个 debug keystore —— 否则 keystore.properties 不存在，
+      # app/build.gradle.kts 就不会应用 release 签名配置，assembleRelease 会产出
+      # 未签名 APK（装不上）。
+      - name: Generate debug keystore (fork without signing secrets)
+        if: env.HAS_KEYSTORE != 'true'
+        run: |
+          keytool -genkeypair -v \
+            -keystore FolkPatch.jks \
+            -alias androiddebugkey \
+            -storepass android -keypass android \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+          cat > keystore.properties << 'EOF'
+          KEYSTORE_FILE=../FolkPatch.jks
+          KEYSTORE_PASSWORD=android
+          KEY_ALIAS=androiddebugkey
+          KEY_PASSWORD=android
+          EOF
+          echo "::notice::No signing secret found; the release APK will be signed with a debug key."
 
       - run: ./gradlew assembleRelease --no-daemon
 
